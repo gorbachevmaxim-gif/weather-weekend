@@ -10,8 +10,8 @@ st.set_page_config(page_title="Анализ выходных ЦФО", layout="wi
 st.title("Поиск идеальных выходных в ЦФО")
 st.markdown("""
 **Два уровня анализа:**
-1. **Резюме:** Сверху показаны города, где ожидается **погода без осадков** (или они закончатся до 04:00 утра).
-2. **Детали:** Снизу можно посмотреть подробный прогноз по **любому** городу из списка.
+1. **Резюме:** Сверху показаны города, где ожидается погода без осадков (или они закончатся до 04:00 утра).
+2. **Детали:** Снизу можно посмотреть подробный прогноз по любому городу из списка.
 """)
 
 # --- СПИСОК ГОРОДОВ ---
@@ -45,9 +45,7 @@ CITIES = {
 
 # --- ФУНКЦИИ ---
 def get_weekend_dates():
-    """Возвращает список из 4 дат: [Сб1, Вс1, Сб2, Вс2]"""
     today = datetime.now().date()
-    
     if today.weekday() == 5:
         sat1 = today
     else:
@@ -73,10 +71,19 @@ def format_rain_hours(hours_list):
     return ", ".join(parts)
 
 def deg_to_compass(num):
+    # Стрелки оставлены намеренно (это данные)
     if num is None: return ""
     val = int((num / 22.5) + 0.5)
     arr = ["С ⬇️", "СВ ↙️", "В ⬅️", "ЮВ ↖️", "Ю ⬆️", "ЮЗ ↗️", "З ➡️", "СЗ ↘️"]
     return arr[(val % 8)]
+
+def format_sun_time(seconds):
+    if seconds <= 0: return "0 мин"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) / 60)
+    if hours > 0:
+        return f"{hours}ч {minutes}мин"
+    return f"{minutes}мин"
 
 @st.cache_data(ttl=3600)
 def analyze_city_basic(name, lat, lon, target_dates):
@@ -87,8 +94,7 @@ def analyze_city_basic(name, lat, lon, target_dates):
     params = {
         "latitude": lat, "longitude": lon,
         "start_date": start_str, "end_date": end_str,
-        "hourly": ["precipitation", "temperature_2m", "wind_speed_10m", "apparent_temperature", "wind_direction_10m"],
-        "daily": ["sunshine_duration"],
+        "hourly": ["precipitation", "temperature_2m", "wind_speed_10m", "apparent_temperature", "wind_direction_10m", "sunshine_duration"],
         "timezone": "Europe/Moscow"
     }
     
@@ -98,59 +104,54 @@ def analyze_city_basic(name, lat, lon, target_dates):
         data = r.json()
         
         hourly = data.get("hourly", {})
-        daily = data.get("daily", {})
-        
         h_precip = hourly.get("precipitation", [])
         h_temp = hourly.get("temperature_2m", [])
         h_feels = hourly.get("apparent_temperature", [])
         h_wind = hourly.get("wind_speed_10m", [])
         h_wind_dir = hourly.get("wind_direction_10m", [])
-        d_sun = daily.get("sunshine_duration", [])
+        h_sun = hourly.get("sunshine_duration", [])
         
-        result = {}
-        req_start = target_dates[0]
+        final_result = {}
+        start_date_obj = target_dates[0]
         
         for i, target_date in enumerate(target_dates):
-            day_offset = (target_date - req_start).days
-            start_h = day_offset * 24
-            end_h = start_h + 24
+            day_offset = (target_date - start_date_obj).days
+            s_idx = day_offset * 24
+            e_idx = s_idx + 24
             
-            if len(h_precip) < end_h: continue
+            if len(h_precip) < e_idx: continue
             
-            # 1. Осадки (с 04:00)
-            active_precip = h_precip[start_h+4 : end_h]
-            total_rain = sum(p for p in active_precip if p is not None)
-            wet_hours = [h+4 for h, p in enumerate(active_precip) if p and p > 0.1]
+            # Осадки (с 04:00)
+            p_slice = h_precip[s_idx+4 : e_idx]
+            total_rain = sum(x for x in p_slice if x)
+            wet_hours = [h+4 for h, x in enumerate(p_slice) if x and x > 0.1]
             
-            # 2. Активные часы (09-18)
-            range_slice = slice(start_h+9, start_h+19)
+            # Активные часы (09-18)
+            act_slice = slice(s_idx+9, s_idx+19)
             
-            t_slice = h_temp[range_slice]
-            f_slice = h_feels[range_slice]
-            w_slice = h_wind[range_slice]
-            d_slice = h_wind_dir[range_slice]
+            # Солнце (09-18)
+            sun_val = sum(x for x in h_sun[act_slice] if x)
             
-            t_min = min(t_slice) if t_slice else 0
-            t_max = max(t_slice) if t_slice else 0
-            f_min = min(f_slice) if f_slice else 0
-            f_max = max(f_slice) if f_slice else 0
-            w_min = min(w_slice) if w_slice else 0
-            w_max = max(w_slice) if w_slice else 0
+            # Температура
+            temps = h_temp[act_slice]
+            feels = h_feels[act_slice]
             
-            w_dir_str = ""
-            if w_slice and d_slice:
-                max_idx = w_slice.index(w_max)
-                w_dir_str = deg_to_compass(d_slice[max_idx])
+            t_min = min(temps) if temps else 0
+            t_max = max(temps) if temps else 0
+            f_min = min(feels) if feels else 0
+            f_max = max(feels) if feels else 0
             
-            # 3. Солнечные часы
-            sun_seconds = (d_sun[day_offset]) if len(d_sun) > day_offset else 0
-            s_hours = int(sun_seconds // 3600)
-            s_minutes = int((sun_seconds % 3600) / 60)
-            sun_str = f"{s_hours} ч {s_minutes} мин"
-            
+            # Ветер
+            winds = h_wind[act_slice]
+            wd = h_wind_dir[act_slice]
+            w_min = min(winds) if winds else 0
+            w_max = max(winds) if winds else 0
+            w_d_str = ""
+            if winds:
+                w_d_str = deg_to_compass(wd[winds.index(w_max)])
+                
             key = target_date.strftime("%Y-%m-%d")
-            
-            result[key] = {
+            final_result[key] = {
                 "date_obj": target_date,
                 "day_name": "Суббота" if target_date.weekday() == 5 else "Воскресенье",
                 "is_dry": total_rain <= 0.2,
@@ -160,11 +161,12 @@ def analyze_city_basic(name, lat, lon, target_dates):
                 "feels_range": f"{f_min:.0f}..{f_max:.0f}",
                 "wind_range": f"{w_min:.0f}..{w_max:.0f}",
                 "wind_max": w_max,
-                "wind_dir": w_dir_str,
-                "sun_str": sun_str
+                "wind_dir": w_d_str,
+                "sun_seconds": sun_val, 
+                "sun_str": format_sun_time(sun_val)
             }
             
-        return result
+        return final_result
     except Exception: return None
 
 @st.cache_data(ttl=3600)
@@ -172,42 +174,32 @@ def get_accuracy_data(lat, lon, target_dates):
     url = "https://api.open-meteo.com/v1/forecast"
     start_str = target_dates[0].strftime("%Y-%m-%d")
     end_str = target_dates[-1].strftime("%Y-%m-%d")
-    
-    params = {
-        "latitude": lat, "longitude": lon,
-        "start_date": start_str, "end_date": end_str,
-        "daily": "temperature_2m_max",
-        "models": "ecmwf_ifs04,gfs_seamless,icon_seamless,gem_global",
-        "timezone": "Europe/Moscow"
-    }
-    
     try:
-        r = requests.get(url, params=params)
+        r = requests.get(url, params={
+            "latitude": lat, "longitude": lon,
+            "start_date": start_str, "end_date": end_str,
+            "daily": "temperature_2m_max",
+            "models": "ecmwf_ifs04,gfs_seamless,icon_seamless,gem_global",
+            "timezone": "Europe/Moscow"
+        })
         data_list = r.json()
         if isinstance(data_list, dict): data_list = [data_list]
-        
         accuracy_map = {}
         req_start = target_dates[0]
-        
         for target_date in target_dates:
             day_offset = (target_date - req_start).days
             temps = []
             for model in data_list:
-                if "daily" in model and "temperature_2m_max" in model["daily"]:
+                if "daily" in model:
                     t_list = model["daily"]["temperature_2m_max"]
-                    if len(t_list) > day_offset:
-                        temps.append(t_list[day_offset])
-            
+                    if len(t_list) > day_offset: temps.append(t_list[day_offset])
             spread = max(temps) - min(temps) if temps else 0
             if spread < 1.5: label, color = "Высокая", "green"
             elif spread < 3.5: label, color = "Средняя", "orange"
             else: label, color = "Низкая", "red"
-            
-            key = target_date.strftime("%Y-%m-%d")
-            accuracy_map[key] = {"label": label, "color": color}
-            
+            accuracy_map[target_date.strftime("%Y-%m-%d")] = {"label": label, "color": color}
         return accuracy_map
-    except Exception: return {}
+    except: return {}
 
 # --- ЛОГИКА ---
 dates = get_weekend_dates()
@@ -219,6 +211,9 @@ st.subheader(f"Даты анализа: {date_str_1} (ближайшие) и {da
 all_data_cache = {} 
 w1_full, w1_sat, w1_sun = [], [], []
 w2_full, w2_sat, w2_sun = [], [], []
+
+sun_ranking_sat = []
+sun_ranking_sun = []
 
 progress_bar = st.progress(0)
 status_text = st.empty()
@@ -245,6 +240,10 @@ for i, city in enumerate(sorted_cities):
             elif s1: w1_sat.append(city)
             elif s2: w1_sun.append(city)
             
+            # Солнце
+            sun_ranking_sat.append((city, res[k1]["sun_seconds"], res[k1]["sun_str"]))
+            sun_ranking_sun.append((city, res[k2]["sun_seconds"], res[k2]["sun_str"]))
+
         if k3 in res and k4 in res:
             s3, s4 = res[k3]["is_dry"], res[k4]["is_dry"]
             if s3 and s4: w2_full.append(city)
@@ -254,46 +253,65 @@ for i, city in enumerate(sorted_cities):
 progress_bar.empty()
 status_text.empty()
 
-# --- ФУНКЦИЯ ОТОБРАЖЕНИЯ СПИСКОВ ---
-def display_summary_list(full, sat, sun):
-    st.markdown("**Весь уикенд (Сб + Вс)**")
-    if full:
-        st.success(", ".join([f"**{c}**" for c in full]))
-    else:
-        st.caption("Нет полностью сухих городов.")
-    
-    st.write("")
-    
+# --- БЛОК 1: ОСАДКИ ---
+st.info(f"Сводка городов без осадков: **Ближайшие выходные ({date_str_1})**")
+c1, c2, c3 = st.columns(3)
+with c1:
+    st.markdown("**Весь уикенд**")
+    if w1_full: st.markdown(", ".join([f"**{c}**" for c in w1_full]))
+    else: st.write("Нет городов.")
+with c2:
     st.markdown("**Только Суббота**")
-    if sat:
-        st.markdown(", ".join(sat))
-    elif not full:
-        st.caption("Нет подходящих городов")
-    else:
-        st.caption("Остальные в списке выше")
-    
-    st.write("")
-
+    if w1_sat: st.write(", ".join(w1_sat))
+    else: st.caption("Пусто")
+with c3:
     st.markdown("**Только Воскресенье**")
-    if sun:
-        st.markdown(", ".join(sun))
-    elif not full:
-        st.caption("Нет подходящих городов")
-    else:
-        st.caption("Остальные в списке выше")
+    if w1_sun: st.write(", ".join(w1_sun))
+    else: st.caption("Пусто")
 
-# --- ВЫВОД РЕЗЮМЕ ---
-week_tabs = st.tabs([f"Ближайшие ({date_str_1})", f"Через неделю ({date_str_2})"])
+# --- БЛОК 2: СОЛНЦЕ (КОМПАКТНО ДЛЯ МОБИЛЬНЫХ) ---
+st.markdown("---")
+st.info("Самые солнечные города (09:00–18:00)")
 
-with week_tabs[0]:
-    display_summary_list(w1_full, w1_sat, w1_sun)
+top_sat = sorted(sun_ranking_sat, key=lambda x: x[1], reverse=True)[:5]
+top_sun = sorted(sun_ranking_sun, key=lambda x: x[1], reverse=True)[:5]
 
-with week_tabs[1]:
-    display_summary_list(w2_full, w2_sat, w2_sun)
+# Используем компактный вывод: одна строка для всех городов
+if top_sat:
+    sat_str = "  |  ".join([f"**{c}**: {t}" for c, _, t in top_sat])
+    st.markdown(f"**Суббота:** {sat_str}")
+else:
+    st.caption("Суббота: Нет данных")
+
+st.write("") # Отступ
+
+if top_sun:
+    sun_str = "  |  ".join([f"**{c}**: {t}" for c, _, t in top_sun])
+    st.markdown(f"**Воскресенье:** {sun_str}")
+else:
+    st.caption("Воскресенье: Нет данных")
 
 st.markdown("---")
 
-# --- ПОДРОБНЫЙ ПРОСМОТР (ВЕРТИКАЛЬНО) ---
+# --- БЛОК 3: ОСАДКИ ЧЕРЕЗ НЕДЕЛЮ ---
+st.info(f"Сводка городов без осадков: **Через неделю ({date_str_2})**")
+c4, c5, c6 = st.columns(3)
+with c4:
+    st.markdown("**Весь уикенд**")
+    if w2_full: st.markdown(", ".join([f"**{c}**" for c in w2_full]))
+    else: st.write("Нет городов.")
+with c5:
+    st.markdown("**Только Суббота**")
+    if w2_sat: st.write(", ".join(w2_sat))
+    else: st.caption("Пусто")
+with c6:
+    st.markdown("**Только Воскресенье**")
+    if w2_sun: st.write(", ".join(w2_sun))
+    else: st.caption("Пусто")
+
+st.markdown("---")
+
+# --- БЛОК 4: ДЕТАЛИ ---
 st.header("Подробный прогноз")
 selected_city = st.selectbox("Выберите город:", sorted_cities)
 
@@ -308,27 +326,21 @@ if selected_city:
         def draw_weekend_tab(tab, day1_date, day2_date):
             k1 = day1_date.strftime("%Y-%m-%d")
             k2 = day2_date.strftime("%Y-%m-%d")
-            
             with tab:
-                # ВЕРТИКАЛЬНОЕ РАСПОЛОЖЕНИЕ КАРТОЧЕК
                 for key in [k1, k2]:
-                    if key not in city_data:
-                        st.error("Нет данных")
-                        continue
-                        
+                    if key not in city_data: continue
                     d = city_data[key]
                     acc = acc_data.get(key, {"label": "Нет данных", "color": "gray"})
                     
                     status_text = "Без осадков (или до 04:00)" if d["is_dry"] else "Ожидаются осадки"
                     status_color = "green" if d["is_dry"] else "red"
                     
-                    with st.container(border=True):
+                    with st.container():
                         st.markdown(f"### {d['day_name']}, {d['date_obj'].strftime('%d.%m')}")
-                        
                         m1, m2, m3 = st.columns(3)
-                        m1.metric("t° (09-18ч)", f"{d['temp_range']}°C", f"Ощущ: {d['feels_range']}°", delta_color="off")
+                        m1.metric("t° (09-18ч)", f"{d['temp_range']}°", f"Ощущ: {d['feels_range']}°", delta_color="off")
                         m2.metric("Ветер", f"{d['wind_range']} км/ч", f"Макс: {d['wind_max']} ({d['wind_dir']})", delta_color="inverse")
-                        m3.metric("Солнце", d['sun_str'])
+                        m3.metric("Солнце (09-18ч)", d['sun_str'])
                         
                         st.markdown(f"**Статус:** :{status_color}[{status_text}]")
                         if not d["is_dry"]:
@@ -339,6 +351,7 @@ if selected_city:
                                 st.caption("Незначительные осадки")
                         
                         st.caption(f"Точность прогноза: :{acc['color']}[**{acc['label']}**]")
+                        st.markdown("---")
 
         draw_weekend_tab(tab1, dates[0], dates[1])
         draw_weekend_tab(tab2, dates[2], dates[3])
